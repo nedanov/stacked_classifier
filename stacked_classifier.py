@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 from sklearn.cross_validation import StratifiedKFold
 import copy
 
@@ -15,17 +14,22 @@ class StackedPredictionCV(object):
 	models_array: an array of pre-defined model objects (with the right hyper parameters)
 	X: an n x m matrix of features where n is the number of samples and m is the number of features
 	y: a vector of length n which contains the target variable
+	n_folds: the number of folds of the cross-validation process
 	seed: random state used in the StratifiedKFold
 	'''
 
-	def __init__(self,models_array):
+	def __init__(self,models_array,second_level_clf,use_probs=True,n_folds=10,random_state=0):
 		'''initialize using an array of model objects'''
 		self.models_array = models_array
+		self.second_level_clf = second_level_clf
+		self.n_folds = n_folds
+		self.random_state = random_state
+		self.use_probs = use_probs
 
-	def fit_transform(self,X,y,n_folds=10,random_state=0):
+	def _fit_transform_level_1(self,X,y):
 		'''fit the models by passing in X feature matrix and y target vector'''
 		
-		kfold = StratifiedKFold(y,n_folds=n_folds,random_state=random_state)
+		kfold = StratifiedKFold(y,n_folds=self.n_folds,random_state=self.random_state)
 
 		#initializing the matrices which will hold the actuals and predictions of all the models
 		y_actual_stack = np.array([])
@@ -71,25 +75,25 @@ class StackedPredictionCV(object):
 		                y_pred_proba_stack = np.hstack((y_pred_proba_stack,y_pred_proba_folds))
 
 		    model_stack.append(model_i_container)
-
-		self.y_actual_stack = y_actual_stack
+		n=len(y_actual_stack)
+		self.y_actual_stack = y_actual_stack.reshape((n,))
 		self.y_pred_stack = y_pred_stack
 		self.y_pred_proba_stack = y_pred_proba_stack
 		self.model_stack = model_stack
 
-	def predict(self):
+	def _predict(self):
 		'''returns the n x p matrix with model predicted values'''
 		return self.y_pred_stack
 
-	def predict_proba(self):
+	def _predict_proba(self):
 		'''returns the n x p matrix of predicted probability values'''
 		return self.y_pred_proba_stack
 
-	def actual_target(self):
+	def _actual_target(self):
 		'''returns the target values which have been reshuffled after the x-validation'''
 		return self.y_actual_stack.reshape((len(self.y_actual_stack),))
 
-	def transform(self,X):
+	def _transform_level_1(self,X):
 		'''a function which takes in an X vector and processes it iteratively by the pre-trained model stack
 		for each model, voting is done across the models such that only one 'predicted' value is returned per model'''
 
@@ -119,4 +123,48 @@ class StackedPredictionCV(object):
 				model_preds = np.hstack((model_preds,average_model_i))
 				model_preds_proba = np.hstack((model_preds_proba,average_model_i_proba))
 
-		return model_preds, model_preds_proba
+		self.model_preds = model_preds
+		self.model_preds_proba = model_preds_proba
+
+	def _fit_level_2(self,X,y):
+		'''method which fits teh level two model. it takes in a classifier as parameter
+		and also the X and y values used in the classifier.  X has been transformed by the _fit_transform_level_1
+		method already'''
+		self.second_level_clf.fit(X,y)
+
+	def fit(self,X,y):
+		'''the method which trains both the level one models and the level 2 model'''
+		use_probs = self.use_probs
+		#train level one models by using the full X and y with CV
+		self._fit_transform_level_1(X,y)
+		#train the level 2 model using the crossvalidated out of fold predictions and the y target
+		if use_probs == False:
+			self._fit_level_2(X=self.y_pred_stack,y=self.y_actual_stack)
+		if use_probs == True:
+			self._fit_level_2(X=self.y_pred_proba_stack,y=self.y_actual_stack)
+
+	def predict(self,X):
+		'''method which is used to make a prediction using the stacked models
+		it first transforms the X matrix using the level 1 models and then it performs a 
+		prediction using the level 2 classifier
+		returns a vector of predicted labels'''
+		self._transform_level_1(X)
+
+		if self.use_probs == False:
+			y_pred = self.second_level_clf.predict(self.model_preds)
+		if self.use_probs == True:
+			y_pred = self.second_level_clf.predict(self.model_preds_proba)
+		return y_pred
+
+	def predict_proba(self,X):
+		'''method which is used to make a prediction of probabilities using the stacked models
+		it first transforms the X matrix using the level 1 models and then it performs a 
+		prediction using the level 2 classifier
+		returns a vector of predicted probabilities'''
+		self._transform_level_1(X)
+		
+		if self.use_probs == False:
+			y_pred_proba = self.second_level_clf.predict_proba(self.model_preds)[:,1]
+		if self.use_probs == True:
+			y_pred_proba = self.second_level_clf.predict_proba(self.model_preds_proba)[:,1]
+		return y_pred_proba
